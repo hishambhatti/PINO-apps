@@ -1,1 +1,9 @@
 .venv/
+solver/__pycache__/
+train_utils/__pycache__/
+models/__pycache__/
+checkpoints/
+data/
+Wave2D/
+Wave1D/
+Wave2D_movie/
