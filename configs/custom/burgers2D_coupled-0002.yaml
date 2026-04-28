@@ -25,7 +25,7 @@ train:
   # epochs: 500
   # milestones: [150, 250, 350, 450, 550, 650, 750, 850, 950]
   # milestones: [150, 300, 450]
-  epochs: 150
+  epochs: 50 # CHANGED FROM 150 TO 50 TO SAVE TIME
   milestones: [25, 50, 75, 100, 125, 150]
   base_lr: 0.001
   scheduler_gamma: 0.5
