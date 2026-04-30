@@ -365,7 +365,9 @@ class DataLoader2D(object):
         self.S = s // sub
         self.T = nt // sub_t
         self.T += 1
-        data = data[:, 0:self.T:sub_t, 0:self.S:sub, 0:self.S:sub]
+        # `self.S` is already downsampled; slice spatial dims using original `s`
+        # so that the resulting grid has shape (self.S, self.S).
+        data = data[:, 0:self.T:sub_t, 0:s:sub, 0:s:sub]
         self.data = data.permute(0, 2, 3, 1)
         
     def make_loader(self, n_sample, batch_size, start=0, train=True):
