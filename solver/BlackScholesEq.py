@@ -144,7 +144,7 @@ class BlackScholesEq1D:
     # ------------------------------------------------------------------
     # Thomas algorithm: O(n) direct solver for a tridiagonal system
     #     A x = d
-    # written from scratch (no library PDE / banded solver is called).
+    # written from scratch
     # Inputs are 1-D tensors describing the three non-zero diagonals.
     # ------------------------------------------------------------------
     def _thomas_solve(self, a_sub, a_diag, a_super, d):
