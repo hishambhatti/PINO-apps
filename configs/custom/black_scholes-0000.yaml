@@ -3,10 +3,10 @@ data:
   total_num: 1000
   n_train: 900
   n_test: 100
-  nx: 4096
+  nx: 512
   nt: 100
   sub: 32
-  sub_t: 1
+  sub_t: 4
   # Black-Scholes physical parameters
   r: 0.05
   sigma: 0.2
