@@ -1,15 +1,20 @@
 data:
   name: 'BlackScholes-0000'
   total_num: 1000
-  # offset: 4500
-  # n_sample: 500
   n_train: 900
   n_test: 100
   nx: 4096
   nt: 100
   sub: 32
   sub_t: 1
-  c: 1.0
+  # Black-Scholes physical parameters
+  r: 0.05
+  sigma: 0.2
+  T: 1.0
+  S_min: 1.0
+  S_max: 200.0
+  K_min: 60.0
+  K_max: 140.0
 
 model:
   layers: [16, 24, 24, 32, 32]
