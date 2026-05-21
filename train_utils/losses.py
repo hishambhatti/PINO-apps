@@ -2,6 +2,48 @@ import numpy as np
 import torch
 import torch.nn.functional as F
 
+def PDE_residual_BlackScholes(model, x, t, a, b, r):
+    # x, t: (N,1) float tensors with requires_grad=True
+    xt = torch.cat([x, t], dim=1)
+    u = model(xt)                     # (N,1)
+    ut = torch.autograd.grad(u.sum(), t, create_graph=True)[0]
+    ux = torch.autograd.grad(u.sum(), x, create_graph=True)[0]
+    uxx = torch.autograd.grad(ux.sum(), x, create_graph=True)[0]
+    residual = ut - a * uxx - b * ux + r * u
+    return residual
+
+def AD_loss_BlackScholes(model,
+                         coll_x, coll_t,
+                         ic_x, ic_t, ic_v,
+                         bc_x, bc_t, bc_v,
+                         sigma, r,
+                         weights=(1.0, 1.0, 1.0)):
+    # coll_*: interior collocation points (N_coll,1)
+    # ic_*: initial-condition points, ic_v is target (N_ic,1)
+    # bc_*: boundary-condition points, bc_v is target (N_bc,1)
+    # sigma, r: scalars
+    # weights: (w_ic, w_bc, w_pde)
+
+    # PDE coefficients
+    a = 0.5 * sigma**2
+    b = r - 0.5 * sigma**2
+
+    # ensure grads are available on collocation inputs
+    coll_x = coll_x.requires_grad_(True)
+    coll_t = coll_t.requires_grad_(True)
+
+    res = PDE_residual_BlackScholes(model, coll_x, coll_t, a, b, r)
+    loss_pde = F.mse_loss(res, torch.zeros_like(res))
+
+    u_ic = model(torch.cat([ic_x, ic_t], dim=1))
+    loss_ic = F.mse_loss(u_ic, ic_v)
+
+    u_bc = model(torch.cat([bc_x, bc_t], dim=1))
+    loss_bc = F.mse_loss(u_bc, bc_v)
+
+    w_ic, w_bc, w_pde = weights
+    total = w_ic * loss_ic + w_bc * loss_bc + w_pde * loss_pde
+    return total, (loss_ic, loss_bc, loss_pde)
 
 def FDM_Darcy(u, a, D=1):
     batchsize = u.size(0)
