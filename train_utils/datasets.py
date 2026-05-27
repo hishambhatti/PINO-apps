@@ -311,6 +311,48 @@ class DarcyFlow(Dataset):
         fa = self.a[item]
         return torch.cat([fa.unsqueeze(2), self.mesh], dim=2), self.u[item]
 
+class DataLoaderBS(object):
+    def __init__(self, x_data, y_data, nx=128, nt=100, sub=1, sub_t=1, new=True):
+#         dataloader = MatReader(datapath)
+        self.sub = sub
+        self.sub_t = sub_t
+        s = nx
+        # if nx is odd
+        if (s % 2) == 1:
+            s = s - 1
+        self.s = s // sub
+
+        self.T = nt // sub_t
+        self.new = new
+        if new:
+            self.T += 1
+        self.x_data = x_data[:, 0:s:sub]
+        # slice y_data so that its temporal length matches self.T after subsampling
+        # use 0:self.T*sub_t:sub_t to cover the intended range even when the
+        # raw data has been saved with slightly different snapshot spacing
+        self.y_data = y_data[:, 0:self.T * sub_t:sub_t, 0:s:sub]
+
+    def make_loader(self, n_sample, batch_size, start=0, train=True):
+        Xs = self.x_data[start:start + n_sample]
+        ys = self.y_data[start:start + n_sample]
+
+        if self.new:
+            gridx = torch.tensor(np.linspace(0, 1, self.s + 1)[:-1], dtype=torch.float)
+            gridt = torch.tensor(np.linspace(0, 1, self.T), dtype=torch.float)
+        else:
+            gridx = torch.tensor(np.linspace(0, 1, self.s), dtype=torch.float)
+            gridt = torch.tensor(np.linspace(0, 1, self.T + 1)[1:], dtype=torch.float)
+        gridx = gridx.reshape(1, 1, self.s)
+        gridt = gridt.reshape(1, self.T, 1)
+
+        Xs = Xs.reshape(n_sample, 1, self.s).repeat([1, self.T, 1])
+        Xs = torch.stack([Xs, gridx.repeat([n_sample, self.T, 1]), gridt.repeat([n_sample, 1, self.s])], dim=3)
+        dataset = torch.utils.data.TensorDataset(Xs, ys)
+        if train:
+            loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)
+        else:
+            loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=False)
+        return loader
 
 
 class DataLoader1D(object):
@@ -329,7 +371,10 @@ class DataLoader1D(object):
         if new:
             self.T += 1
         self.x_data = x_data[:, 0:s:sub]
-        self.y_data = y_data[:, 0:self.T:sub_t, 0:s:sub]
+        # slice y_data so that its temporal length matches self.T after subsampling
+        # use 0:self.T*sub_t:sub_t to cover the intended range even when the
+        # raw data has been saved with slightly different snapshot spacing
+        self.y_data = y_data[:, 0:self.T * sub_t:sub_t, 0:s:sub]
 
     def make_loader(self, n_sample, batch_size, start=0, train=True):
         Xs = self.x_data[start:start + n_sample]
