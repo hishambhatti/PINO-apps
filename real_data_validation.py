@@ -375,8 +375,7 @@ def plot_vol_smile_comparison(results_df, save_dir=None):
     pino_ivs = []
     for _, row in df.iterrows():
         iv = implied_vol_from_price(
-            row['pino_price'], row['market_price'] + row['pino_error'],
-            # use spot from moneyness: spot = moneyness * K
+            price=row['pino_price'],
             S=row['moneyness'] * row['strike'],
             K=row['strike'], r=0.05, T=row['T_years'])
         pino_ivs.append(iv)
