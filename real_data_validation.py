@@ -6,11 +6,11 @@ This script handles two workflows:
 
 A) VALIDATION (train on synthetic, validate on real):
     from real_data_validation import (
-        fetch_spy_options, filter_liquid_calls,
+        fetch_aapl_options, filter_liquid_calls,
         build_validation_set, evaluate_pino_vs_market,
         plot_validation_results,
     )
-    df = fetch_spy_options()
+    df = fetch_aapl_options()
     calls = filter_liquid_calls(df)
     val_x, val_meta = build_validation_set(calls, config)
     results = evaluate_pino_vs_market(model, val_x, val_meta, config, device)
@@ -18,11 +18,11 @@ A) VALIDATION (train on synthetic, validate on real):
 
 B) SPARSE TRAINING (train directly on real data):
     from real_data_validation import (
-        fetch_spy_options, filter_liquid_calls,
+        fetch_aapl_options, filter_liquid_calls,
         build_sparse_training_set, DataLoaderBSSparse,
         train_bs_real,
     )
-    df = fetch_spy_options()
+    df = fetch_aapl_options()
     calls = filter_liquid_calls(df)
     x_data, y_sparse, mask, meta = build_sparse_training_set(calls, config)
     dataset = DataLoaderBSSparse(x_data, y_sparse, mask,
@@ -44,7 +44,7 @@ from datetime import datetime
 # 1. FETCH REAL OPTIONS DATA
 # ---------------------------------------------------------------------------
 
-def fetch_spy_options(ticker_symbol='SPY', max_expirations=6):
+def fetch_aapl_options(ticker_symbol='AAPL', max_expirations=6):
     """
     Pull live option chains from Yahoo Finance.
 
@@ -55,7 +55,7 @@ def fetch_spy_options(ticker_symbol='SPY', max_expirations=6):
     Parameters
     ----------
     ticker_symbol : str
-        Underlying ticker (default SPY — European-style index, best BS fit)
+        Underlying ticker (default AAPL — European-style index, best BS fit)
     max_expirations : int
         How many expiration dates to pull (closest ones first)
     """
@@ -757,17 +757,17 @@ if __name__ == '__main__':
     print("Fetching real options data from Yahoo Finance...")
     print("=" * 60)
 
-    df = fetch_spy_options(ticker_symbol='SPY', max_expirations=6)
+    df = fetch_aapl_options(ticker_symbol='AAPL', max_expirations=6)
     calls = filter_liquid_calls(df)
 
     # Save raw data
-    out_path = 'data/spy_options_raw.csv'
+    out_path = 'data/aapl_options_raw.csv'
     import os
     os.makedirs('data', exist_ok=True)
     df.to_csv(out_path, index=False)
     print(f"\nSaved full dataset to {out_path}")
 
-    calls_path = 'data/spy_calls_filtered.csv'
+    calls_path = 'data/aapl_calls_filtered.csv'
     calls.to_csv(calls_path, index=False)
     print(f"Saved filtered calls to {calls_path}")
 
@@ -779,6 +779,6 @@ if __name__ == '__main__':
     print(f"Avg implied vol:   {calls['implied_vol'].mean():.4f}")
     print(f"Total contracts:   {len(calls)}")
     print(f"\nNOTE: S_min/S_max in your config is [{1.0}, {200.0}].")
-    print(f"SPY is ~${calls['spot_price'].iloc[0]:.0f}, so you'll need to update")
-    print(f"config S_min/S_max to cover SPY's range (e.g. S_min=300, S_max=800)")
+    print(f"AAPL is ~${calls['spot_price'].iloc[0]:.0f}, so you'll need to update")
+    print(f"config S_min/S_max to cover AAPL's range (e.g. S_min=300, S_max=800)")
     print(f"and retrain, OR use a cheaper underlying like IWM or a single stock.")
