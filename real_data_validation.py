@@ -124,25 +124,125 @@ def filter_liquid_calls(df, moneyness_range=(0.8, 1.2), min_volume=10):
 
 
 # ---------------------------------------------------------------------------
+# 1b. TRAIN / VALIDATION SPLIT  (fix #1: never validate on training data)
+# ---------------------------------------------------------------------------
+
+def split_calls_train_val(calls, val_frac=0.3, seed=0, stratify_by_expiry=True):
+    """
+    Split the filtered option chain into disjoint train / validation sets.
+
+    By default we stratify by expiration so both sets contain every maturity
+    (otherwise a random split could leave whole expiries out of one side).
+
+    Returns
+    -------
+    train_calls, val_calls : DataFrames (disjoint rows of `calls`)
+    """
+    rng = np.random.default_rng(seed)
+    if stratify_by_expiry and 'expiration' in calls.columns:
+        train_parts, val_parts = [], []
+        for _, grp in calls.groupby('expiration'):
+            idx = rng.permutation(len(grp))
+            n_val = max(1, int(round(val_frac * len(grp)))) if len(grp) > 1 else 0
+            val_parts.append(grp.iloc[idx[:n_val]])
+            train_parts.append(grp.iloc[idx[n_val:]])
+        train_calls = pd.concat(train_parts).sort_index()
+        val_calls   = pd.concat(val_parts).sort_index()
+    else:
+        idx = rng.permutation(len(calls))
+        n_val = int(round(val_frac * len(calls)))
+        val_calls   = calls.iloc[idx[:n_val]].sort_index()
+        train_calls = calls.iloc[idx[n_val:]].sort_index()
+
+    print(f"Split {len(calls)} calls -> {len(train_calls)} train / "
+          f"{len(val_calls)} validation (val_frac={val_frac})")
+    return train_calls, val_calls
+
+
+# ---------------------------------------------------------------------------
+# 1c. CALIBRATE A SINGLE BS VOLATILITY PER EXPIRY  (fix #2)
+# ---------------------------------------------------------------------------
+
+def calibrate_sigma_per_expiry(options_df, r, sigma_bounds=(0.02, 2.5)):
+    """
+    For each expiration, find the single Black-Scholes volatility that best
+    fits that expiry's market prices (least squares over strikes).
+
+    This is the *fair* constant-vol benchmark: one sigma per maturity, fit on
+    the TRAIN set, then applied to both the analytical-BS baseline AND fed to
+    PINO through its sigma channel.  A constant-vol model cannot reproduce the
+    smile across strikes, so the residual error is exactly the smile effect --
+    which is the honest thing to measure.
+
+    Returns
+    -------
+    lookup : dict {T_years: sigma}
+    """
+    from scipy.optimize import minimize_scalar
+
+    lookup = {}
+    for T_val, grp in options_df.groupby('time_to_expiry_years'):
+        if T_val <= 0:
+            continue
+        spots   = grp['spot_price'].to_numpy()
+        strikes = grp['strike'].to_numpy()
+        prices  = grp['mid_price'].to_numpy()
+
+        def objective(sig):
+            err = 0.0
+            for S, K, p in zip(spots, strikes, prices):
+                err += (_bs_call_analytical(S, K, r, sig, T_val) - p) ** 2
+            return err
+
+        res = minimize_scalar(objective, bounds=sigma_bounds, method='bounded')
+        lookup[float(T_val)] = float(res.x)
+
+    if lookup:
+        print("Calibrated per-expiry sigma (fit on train set):")
+        for T_val in sorted(lookup):
+            print(f"  T={T_val:.4f} yr -> sigma={lookup[T_val]:.4f}")
+    return lookup
+
+
+def sigma_for_T(lookup, T_val, fallback):
+    """Look up the calibrated sigma for the expiry nearest to T_val."""
+    if not lookup:
+        return fallback
+    keys = np.array(list(lookup.keys()))
+    return lookup[float(keys[np.argmin(np.abs(keys - T_val))])]
+
+
+# ---------------------------------------------------------------------------
 # 2. BUILD VALIDATION TENSORS MATCHING PINO INPUT FORMAT
 # ---------------------------------------------------------------------------
 
-def build_validation_set(options_df, config):
+def build_validation_set(options_df, config, sigma_lookup=None):
     """
     Convert real option data into the tensor format DataLoaderBS produces.
 
     For each real option (with strike K), we:
       - Build the payoff max(S - K, 0) on the model's S-grid
       - Attach normalized x and tau coordinates
+      - Attach a sigma channel = the calibrated per-expiry vol (fix #3), so
+        the model is priced at the SAME volatility as the analytical-BS
+        baseline.  Feeding each option its own market IV would be circular
+        (IV is defined to reproduce the market price), so we use one
+        calibrated sigma per expiry instead.
       - Record the real market price + metadata for comparison
+
+    Parameters
+    ----------
+    sigma_lookup : dict {T_years: sigma} or None
+        Per-expiry calibrated vol (from calibrate_sigma_per_expiry on the
+        TRAIN set).  If None, falls back to config['data']['sigma'].
 
     Returns
     -------
-    val_x : Tensor [N_options, Nt, Nx, 3]
+    val_x : Tensor [N_options, Nt, Nx, C]   (C=4 if sigma channel present)
         Model input (same format as training data)
     val_meta : list of dicts
-        One per option: strike, market_price, implied_vol, T, spot, etc.
-        Plus the grid indices (S_idx, tau_idx) where the real observation lives.
+        One per option: strike, market_price, implied_vol, T, spot, sigma_used,
+        plus the grid indices (S_idx, tau_idx) where the real observation lives.
     """
     nx_full = config['data']['nx']
     nt_full = config['data']['nt']
@@ -151,6 +251,12 @@ def build_validation_set(options_df, config):
     S_min   = config['data']['S_min']
     S_max   = config['data']['S_max']
     T_max   = config['data']['T']
+
+    # sigma channel normalization range (must match training)
+    sigma_min = config['data'].get('sigma_min', None)
+    sigma_max = config['data'].get('sigma_max', None)
+    has_sigma_channel = sigma_min is not None and sigma_max is not None
+    fallback_sigma = config['data'].get('sigma', 0.2)
 
     Nx = nx_full // sub_x
     Nt = nt_full // sub_t + 1
@@ -184,14 +290,25 @@ def build_validation_set(options_df, config):
         # --- Build the payoff (initial condition) on the S-grid ---
         payoff = np.maximum(S_grid - K, 0.0).astype(np.float32)   # [Nx]
 
-        # --- Assemble input tensor [Nt, Nx, 3] ---
+        # --- Volatility for this option (calibrated per-expiry) ---
+        sigma_used = sigma_for_T(sigma_lookup, T_opt, fallback_sigma) \
+            if sigma_lookup else fallback_sigma
+        if has_sigma_channel:
+            sigma_used = float(np.clip(sigma_used, sigma_min, sigma_max))
+
+        # --- Assemble input tensor [Nt, Nx, C] ---
         #   channel 0: payoff (repeated across all tau)
         #   channel 1: x_norm (spatial coordinate)
         #   channel 2: tau_norm (temporal coordinate)
-        x_input = np.zeros((Nt, Nx, 3), dtype=np.float32)
+        #   channel 3: sigma_norm (constant, fix #3)  -- only if model uses it
+        n_ch = 4 if has_sigma_channel else 3
+        x_input = np.zeros((Nt, Nx, n_ch), dtype=np.float32)
         x_input[:, :, 0] = payoff[None, :]                       # broadcast payoff
         x_input[:, :, 1] = gridx[None, :]                        # broadcast x_norm
         x_input[:, :, 2] = gridt[:, None]                        # broadcast tau_norm
+        if has_sigma_channel:
+            sigma_norm = (sigma_used - sigma_min) / (sigma_max - sigma_min)
+            x_input[:, :, 3] = sigma_norm
 
         # --- Find closest grid indices for the real observation ---
         # S index: where on the S-grid is the current spot price?
@@ -209,6 +326,7 @@ def build_validation_set(options_df, config):
             'implied_vol':  iv,
             'T_years':      T_opt,
             'spot':         spot,
+            'sigma_used':   sigma_used,
             'S_idx':        S_idx,
             'S_at_idx':     S_grid[S_idx],
             'tau_idx':      tau_idx,
@@ -239,7 +357,7 @@ def evaluate_pino_vs_market(model, val_x, val_meta, config, device,
     """
     model.eval()
     r     = config['data']['r']
-    sigma = config['data']['sigma']
+    fallback_sigma = config['data'].get('sigma', 0.2)
 
     results = []
 
@@ -253,10 +371,13 @@ def evaluate_pino_vs_market(model, val_x, val_meta, config, device,
             pred_j = pred[j].squeeze()                          # [Nt, Nx]
             pino_price = pred_j[meta['tau_idx'], meta['S_idx']].item()
 
-            # Analytical BS price for comparison
+            # Analytical BS at the SAME (calibrated) sigma the model was fed,
+            # so PINO-vs-BS measures operator fidelity and both-vs-market
+            # measures the constant-vol smile error (fix #2).
+            sigma_used = meta.get('sigma_used', fallback_sigma)
             bs_price = _bs_call_analytical(
                 S=meta['spot'], K=meta['strike'],
-                r=r, sigma=sigma, T=meta['T_years'])
+                r=r, sigma=sigma_used, T=meta['T_years'])
 
             results.append({
                 'strike':        meta['strike'],
@@ -265,17 +386,21 @@ def evaluate_pino_vs_market(model, val_x, val_meta, config, device,
                 'bs_analytical': bs_price,
                 'pino_error':    pino_price - meta['market_price'],
                 'bs_error':      bs_price - meta['market_price'],
+                'pino_vs_bs':    pino_price - bs_price,
+                'sigma_used':    sigma_used,
                 'implied_vol':   meta['implied_vol'],
                 'moneyness':     meta['moneyness'],
                 'T_years':       meta['T_years'],
             })
 
     df = pd.DataFrame(results)
-    print(f"\n=== Validation Summary ({len(df)} options) ===")
-    print(f"PINO  mean abs error: ${df['pino_error'].abs().mean():.4f}")
-    print(f"BS    mean abs error: ${df['bs_error'].abs().mean():.4f}")
-    print(f"PINO  RMSE:           ${np.sqrt((df['pino_error']**2).mean()):.4f}")
-    print(f"BS    RMSE:           ${np.sqrt((df['bs_error']**2).mean()):.4f}")
+    print(f"\n=== Validation Summary ({len(df)} options, held-out) ===")
+    print(f"PINO   mean abs error vs market: ${df['pino_error'].abs().mean():.4f}")
+    print(f"BS     mean abs error vs market: ${df['bs_error'].abs().mean():.4f}")
+    print(f"PINO   RMSE vs market:           ${np.sqrt((df['pino_error']**2).mean()):.4f}")
+    print(f"BS     RMSE vs market:           ${np.sqrt((df['bs_error']**2).mean()):.4f}")
+    print(f"PINO-vs-BS RMSE (operator fit):  ${np.sqrt((df['pino_vs_bs']**2).mean()):.4f}  "
+          f"(small => PINO faithfully emulates BS at the calibrated sigma)")
     return df
 
 
@@ -391,6 +516,9 @@ def plot_vol_smile_comparison(results_df, save_dir=None):
         sub = df[df['T_years'] == T_val].sort_values('strike')
         ax.plot(sub['strike'], sub['implied_vol'],    'o-', label='Market IV', markersize=4)
         ax.plot(sub['strike'], sub['pino_implied_vol'], 's--', label='PINO IV', markersize=4)
+        if 'sigma_used' in sub.columns and len(sub):
+            ax.axhline(sub['sigma_used'].iloc[0], color='green', linestyle=':',
+                       alpha=0.7, label='Calibrated BS sigma')
         ax.set_xlabel('Strike')
         ax.set_ylabel('Implied Volatility')
         ax.set_title(f'T = {T_val:.3f} yr')
@@ -413,7 +541,7 @@ def plot_vol_smile_comparison(results_df, save_dir=None):
 # 5. SPARSE TRAINING SET (train on real data)
 # ---------------------------------------------------------------------------
 
-def build_sparse_training_set(options_df, config):
+def build_sparse_training_set(options_df, config, sigma_lookup=None):
     """
     Group real options by strike K.  For each unique K, build:
       - payoff:    max(S - K, 0) on the model's S-grid        [Nx]
@@ -425,10 +553,11 @@ def build_sparse_training_set(options_df, config):
 
     Returns
     -------
-    x_data  : Tensor [Nsamples, Nx]           payoffs
-    y_sparse: Tensor [Nsamples, Nt, Nx]       sparse targets
-    mask    : Tensor [Nsamples, Nt, Nx]        observation mask
-    meta    : list of dicts                    per-sample info
+    x_data   : Tensor [Nsamples, Nx]           payoffs
+    y_sparse : Tensor [Nsamples, Nt, Nx]       sparse targets
+    mask     : Tensor [Nsamples, Nt, Nx]        observation mask
+    sigma_data : Tensor [Nsamples]              per-sample calibrated vol (fix #3)
+    meta     : list of dicts                    per-sample info
     """
     nx_full = config['data']['nx']
     nt_full = config['data']['nt']
@@ -437,6 +566,9 @@ def build_sparse_training_set(options_df, config):
     S_min   = config['data']['S_min']
     S_max   = config['data']['S_max']
     T_max   = config['data']['T']
+    sigma_min = config['data'].get('sigma_min', None)
+    sigma_max = config['data'].get('sigma_max', None)
+    fallback_sigma = config['data'].get('sigma', 0.2)
 
     Nx = nx_full // sub_x
     Nt = nt_full // sub_t + 1
@@ -453,6 +585,7 @@ def build_sparse_training_set(options_df, config):
     x_list      = []
     y_sparse_list = []
     mask_list   = []
+    sigma_list  = []
     meta_list   = []
 
     for K, group in grouped:
@@ -471,6 +604,7 @@ def build_sparse_training_set(options_df, config):
         y_sp = np.zeros((Nt, Nx), dtype=np.float32)
         m    = np.zeros((Nt, Nx), dtype=np.float32)
         obs_count = 0
+        sigmas_here = []
 
         for _, row in group.iterrows():
             T_opt = row['time_to_expiry_years']
@@ -487,24 +621,36 @@ def build_sparse_training_set(options_df, config):
             y_sp[tau_idx, S_idx] = price
             m[tau_idx, S_idx]    = 1.0
             obs_count += 1
+            sigmas_here.append(
+                sigma_for_T(sigma_lookup, T_opt, fallback_sigma)
+                if sigma_lookup else fallback_sigma)
 
         # Only keep samples that have at least one observation
         if obs_count == 0:
             continue
 
+        # One representative volatility per strike-sample (mean over its
+        # observed expiries), clamped to the model's training range.
+        sigma_sample = float(np.mean(sigmas_here))
+        if sigma_min is not None and sigma_max is not None:
+            sigma_sample = float(np.clip(sigma_sample, sigma_min, sigma_max))
+
         x_list.append(payoff)
         y_sparse_list.append(y_sp)
         mask_list.append(m)
+        sigma_list.append(sigma_sample)
         meta_list.append({
             'strike': K,
             'spot': spot,
             'S_idx': S_idx,
             'n_observations': obs_count,
+            'sigma_used': sigma_sample,
         })
 
     x_data   = torch.tensor(np.array(x_list),        dtype=torch.float32)
     y_sparse = torch.tensor(np.array(y_sparse_list),  dtype=torch.float32)
     mask     = torch.tensor(np.array(mask_list),       dtype=torch.float32)
+    sigma_data = torch.tensor(np.array(sigma_list),    dtype=torch.float32)
 
     total_obs = int(mask.sum().item())
     total_pts = mask.numel()
@@ -512,7 +658,7 @@ def build_sparse_training_set(options_df, config):
     print(f"  Grid size per sample: [{Nt}, {Nx}] = {Nt * Nx} points")
     print(f"  Total observations:   {total_obs} / {total_pts} "
           f"({100 * total_obs / total_pts:.4f}% filled)")
-    return x_data, y_sparse, mask, meta_list
+    return x_data, y_sparse, mask, sigma_data, meta_list
 
 
 # ---------------------------------------------------------------------------
@@ -527,7 +673,8 @@ class DataLoaderBSSparse:
     y_sparse: [batch, Nt, Nx]       sparse real prices
     mask    : [batch, Nt, Nx]       1 where observed, 0 elsewhere
     """
-    def __init__(self, x_data, y_sparse, mask, nx, nt, sub=1, sub_t=1):
+    def __init__(self, x_data, y_sparse, mask, nx, nt, sub=1, sub_t=1,
+                 sigma_data=None, sigma_min=None, sigma_max=None):
         s = nx
         if s % 2 == 1:
             s = s - 1
@@ -539,6 +686,9 @@ class DataLoaderBSSparse:
         self.x_data  = x_data
         self.y_sparse = y_sparse
         self.mask     = mask
+        self.sigma_data = sigma_data
+        self.sigma_min  = sigma_min
+        self.sigma_max  = sigma_max
 
     def make_loader(self, n_sample, batch_size, start=0, train=True):
         Xs   = self.x_data[start:start + n_sample]
@@ -553,11 +703,21 @@ class DataLoaderBSSparse:
 
         # Expand payoff across time and stack with coordinates
         Xs = Xs.reshape(n_sample, 1, self.s).repeat([1, self.T, 1])
-        Xs = torch.stack([
+        channels = [
             Xs,
             gridx.repeat([n_sample, self.T, 1]),
             gridt.repeat([n_sample, 1, self.s]),
-        ], dim=3)
+        ]
+
+        # Optional sigma channel (fix #3) -- must match the trained model.
+        if self.sigma_data is not None:
+            sig = self.sigma_data[start:start + n_sample].reshape(n_sample, 1, 1).float()
+            if self.sigma_min is not None and self.sigma_max is not None and \
+                    (self.sigma_max - self.sigma_min) > 0:
+                sig = (sig - self.sigma_min) / (self.sigma_max - self.sigma_min)
+            channels.append(sig.repeat([1, self.T, self.s]))
+
+        Xs = torch.stack(channels, dim=3)
 
         dataset = torch.utils.data.TensorDataset(Xs, ys, ms)
         loader  = torch.utils.data.DataLoader(
@@ -613,6 +773,8 @@ def FDM_BlackScholes(u, D=1.0, r=0.05, sigma=0.2, T=1.0, S_min=1.0, S_max=200.0)
     """
     Black-Scholes PDE residual on a normalized (tau_norm, x_norm) grid.
     Duplicated here so this file is self-contained.
+
+    sigma may be a scalar OR a per-sample tensor of shape [batch] (fix #3).
     """
     batchsize = u.size(0)
     nt = u.size(1)
@@ -623,8 +785,12 @@ def FDM_BlackScholes(u, D=1.0, r=0.05, sigma=0.2, T=1.0, S_min=1.0, S_max=200.0)
     dx = D / nx
 
     Lx    = math.log(S_max / S_min)
-    a     = 0.5 * sigma ** 2
-    b     = r - 0.5 * sigma ** 2
+    if torch.is_tensor(sigma) and sigma.dim() > 0:
+        sigma_b = sigma.reshape(batchsize, 1, 1).to(u.device, u.dtype)
+    else:
+        sigma_b = sigma
+    a     = 0.5 * sigma_b ** 2
+    b     = r - 0.5 * sigma_b ** 2
     a_eff = a * T / Lx ** 2
     b_eff = b * T / Lx
     r_eff = r * T
@@ -676,6 +842,8 @@ def train_bs_real(model,
     T     = config['data']['T']
     S_min = config['data']['S_min']
     S_max = config['data']['S_max']
+    sigma_min = config['data'].get('sigma_min', sigma)
+    sigma_max = config['data'].get('sigma_max', sigma)
     ckpt_freq = config['train']['ckpt_freq']
 
     from train_utils.losses import LpLoss
@@ -698,9 +866,14 @@ def train_bs_real(model,
             x, y_sparse, mask = x.to(rank), y_sparse.to(rank), mask.to(rank)
             out = model(x).reshape(y_sparse.shape)
 
+            # per-sample sigma recovered from the sigma input channel (fix #3)
+            if x.shape[-1] >= 4:
+                sigma_b = sigma_min + x[:, 0, 0, 3] * (sigma_max - sigma_min)
+            else:
+                sigma_b = sigma
             loss_ic, loss_f, loss_data = PINO_loss_bs_sparse(
                 out, x[:, 0, :, 0], mask, y_sparse,
-                r=r, sigma=sigma, T=T, S_min=S_min, S_max=S_max)
+                r=r, sigma=sigma_b, T=T, S_min=S_min, S_max=S_max)
 
             total_loss = (loss_ic * ic_weight
                           + loss_f * f_weight

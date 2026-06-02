@@ -312,7 +312,8 @@ class DarcyFlow(Dataset):
         return torch.cat([fa.unsqueeze(2), self.mesh], dim=2), self.u[item]
 
 class DataLoaderBS(object):
-    def __init__(self, x_data, y_data, nx=128, nt=100, sub=1, sub_t=1, new=True):
+    def __init__(self, x_data, y_data, nx=128, nt=100, sub=1, sub_t=1, new=True,
+                 sigma_data=None, sigma_min=None, sigma_max=None):
 #         dataloader = MatReader(datapath)
         self.sub = sub
         self.sub_t = sub_t
@@ -332,6 +333,12 @@ class DataLoaderBS(object):
         # raw data has been saved with slightly different snapshot spacing
         self.y_data = y_data[:, 0:self.T * sub_t:sub_t, 0:s:sub]
 
+        # Optional per-sample volatility (fix #3: sigma as an input channel).
+        # When provided, make_loader appends a 4th channel = normalized sigma.
+        self.sigma_data = sigma_data
+        self.sigma_min = sigma_min
+        self.sigma_max = sigma_max
+
     def make_loader(self, n_sample, batch_size, start=0, train=True):
         Xs = self.x_data[start:start + n_sample]
         ys = self.y_data[start:start + n_sample]
@@ -346,7 +353,20 @@ class DataLoaderBS(object):
         gridt = gridt.reshape(1, self.T, 1)
 
         Xs = Xs.reshape(n_sample, 1, self.s).repeat([1, self.T, 1])
-        Xs = torch.stack([Xs, gridx.repeat([n_sample, self.T, 1]), gridt.repeat([n_sample, 1, self.s])], dim=3)
+        channels = [Xs,
+                    gridx.repeat([n_sample, self.T, 1]),
+                    gridt.repeat([n_sample, 1, self.s])]
+
+        if self.sigma_data is not None:
+            sig = self.sigma_data[start:start + n_sample].reshape(n_sample, 1, 1).float()
+            if self.sigma_min is not None and self.sigma_max is not None and \
+                    (self.sigma_max - self.sigma_min) > 0:
+                sig_norm = (sig - self.sigma_min) / (self.sigma_max - self.sigma_min)
+            else:
+                sig_norm = sig
+            channels.append(sig_norm.repeat([1, self.T, self.s]))
+
+        Xs = torch.stack(channels, dim=3)
         dataset = torch.utils.data.TensorDataset(Xs, ys)
         if train:
             loader = torch.utils.data.DataLoader(dataset, batch_size=batch_size, shuffle=True)

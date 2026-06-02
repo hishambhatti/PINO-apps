@@ -1,20 +1,26 @@
 data:
   name: 'BlackScholes-0000'
-  total_num: 10
-  n_train: 8
-  n_test: 2
+  total_num: 1000          # = n_sigma * n_K
+  n_train: 900
+  n_test: 100
   nx: 512
-  nt: 100
+  nt: 200                  # finer tau grid (fix #4: better resolution for short expiries)
   sub: 4
-  sub_t: 4
+  sub_t: 1
   # Black-Scholes physical parameters
   r: 0.05
-  sigma: 0.2
-  T: 1.0
-  S_min: 1.0
-  S_max: 200.0
-  K_min: 60.0
-  K_max: 140.0
+  sigma: 0.2               # reference / fallback only; sigma now varies per-sample
+  # sigma is now an INPUT CHANNEL spanning [sigma_min, sigma_max] (fix #3)
+  sigma_min: 0.10
+  sigma_max: 0.80
+  n_sigma: 10              # number of distinct sigma slices in the synthetic set
+  T: 0.5                   # horizon shared by synthetic + real data (fix #4)
+  # Domain shared by BOTH synthetic generation and real validation (fix #4).
+  # Must cover the underlying spot and the real strike range.
+  S_min: 100.0
+  S_max: 400.0
+  K_min: 150.0
+  K_max: 380.0
 
 model:
   layers: [16, 24, 24, 32, 32]
