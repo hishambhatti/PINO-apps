@@ -15,10 +15,14 @@ Here are the things to include:
 - Show the figures just like in the paper
 - Conclusion: 
 - Sort of just a shortened paper
+Put some of the images from figures/ in here
 
-Read the full paper here: CSE_481M_Paper.pdf
+How to run 
+- Basically just python venv, requirements.txt, then run the jupyter notebooks
+
+Read the full paper here: link to CSE_481M_Paper.pdf
 A video of our final presentation can be here: https://youtu.be/Hz8KmMqRbpc
 
 Mention that this is based off of the https://github.com/shawnrosofsky/PINO_Applications Github
 
-Completed as part of CSE 481M (Machine Learning Capstone) at the University of Washington, Spring 2026. Thanks to Prof. Pang Wei Koh, Zhiyuan Zeng, and Rulin Shao for their invaluable guidance
+Italicized: Completed as part of CSE 481M (Machine Learning Capstone) at the University of Washington, Spring 2026. Thanks to Prof. Pang Wei Koh, Zhiyuan Zeng, and Rulin Shao for their invaluable guidance
