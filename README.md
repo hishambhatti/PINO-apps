@@ -8,7 +8,7 @@ View the full [paper](CSE_481M_Paper.pdf) and 5 minute [presentation](https://yo
   <img src="figures/pino.png" alt="PINO architecture" width="720"/>
 </p>
 
-Created by Muhammadbager Al-Ali, Hisham Bhatti, Graham Cobden 
+Created by Muhammadbager Al-Ali, Hisham Bhatti, and Graham Cobden 
 
 ---
 
@@ -94,7 +94,7 @@ Sparse, masked supervision is viable, but whether rough empirical data can relia
 
 ## Conclusion
 
-PINO's physics loss is remarkably robust: zero-shot super-resolution works up to large scale factors when training data is not too coarse, and physics-only training can anchor solutions even without output labels. However, data still matters! It anchors the solution profile that physics alone cannot fully recover but low-fidelity, real-world supervision can be nearly as useful as clean synthetic data in our Black–Scholes experiments.
+PINO's physics loss is remarkably robust: zero-shot super-resolution works up to large scale factors when training data is not too coarse, and physics-only training can anchor solutions even without output labels. However, data still matters! It anchors the solution profile that physics alone cannot fully recover. Our results show that for the Black-Scholes experiments, low-fidelity, real-world supervision can be nearly as useful as clean synthetic data.
 
 These results support using PINO in low-data, non-ideal regimes common in engineering and social-science domains where measurements are sparse, noisy, or only loosely satisfy the PDE.
 
